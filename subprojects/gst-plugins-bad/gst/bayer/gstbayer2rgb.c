@@ -128,6 +128,7 @@ struct _GstBayer2RGB
   int format;
   int bpp;                      /* bits per pixel, 8/10/12/14/16 */
   int bigendian;
+  int input_stride;             /* input row stride override in bytes, 0 = auto */
 };
 
 struct _GstBayer2RGBClass
@@ -165,7 +166,8 @@ struct _GstBayer2RGBClass
 
 enum
 {
-  PROP_0
+  PROP_0,
+  PROP_INPUT_STRIDE
 };
 
 GType gst_bayer2rgb_get_type (void);
@@ -203,6 +205,11 @@ gst_bayer2rgb_class_init (GstBayer2RGBClass * klass)
   gobject_class->set_property = gst_bayer2rgb_set_property;
   gobject_class->get_property = gst_bayer2rgb_get_property;
 
+  g_object_class_install_property (gobject_class, PROP_INPUT_STRIDE,
+      g_param_spec_int ("input-stride", "Input stride",
+          "Input Bayer row stride in bytes (0 = auto from width)",
+          0, G_MAXINT, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
   gst_element_class_set_static_metadata (gstelement_class,
       "Bayer to RGB decoder for cameras", "Filter/Converter/Video",
       "Converts video/x-bayer to video/x-raw",
@@ -235,13 +242,16 @@ gst_bayer2rgb_init (GstBayer2RGB * filter)
   gst_base_transform_set_in_place (GST_BASE_TRANSFORM (filter), FALSE);
 }
 
-/* No properties are implemented, so only a warning is produced */
 static void
 gst_bayer2rgb_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec)
 {
+  GstBayer2RGB *filter = GST_BAYER2RGB (object);
 
   switch (prop_id) {
+    case PROP_INPUT_STRIDE:
+      filter->input_stride = g_value_get_int (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -252,8 +262,12 @@ static void
 gst_bayer2rgb_get_property (GObject * object, guint prop_id,
     GValue * value, GParamSpec * pspec)
 {
+  GstBayer2RGB *filter = GST_BAYER2RGB (object);
 
   switch (prop_id) {
+    case PROP_INPUT_STRIDE:
+      g_value_set_int (value, filter->input_stride);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -335,6 +349,7 @@ gst_bayer2rgb_reset (GstBayer2RGB * filter)
   filter->b_off = 0;
   filter->bpp = 8;
   filter->bigendian = 0;
+  filter->input_stride = 0;
   gst_video_info_init (&filter->info);
 }
 
@@ -550,10 +565,8 @@ typedef void (*process_func16) (guint16 * d0, guint16 * d1, const guint8 * s0,
 
 static void
 gst_bayer2rgb_process (GstBayer2RGB * bayer2rgb, uint8_t * dest,
-    int dest_stride, uint8_t * src)
+    int dest_stride, uint8_t * src, int src_stride)
 {
-  const int src_stride =
-      GST_ROUND_UP_4 (bayer2rgb->width) * DIV_ROUND_UP (bayer2rgb->bpp, 8);
   const int bayersrc16 = bayer2rgb->bpp > 8;
   int j;
   guint8 *tmp;
@@ -765,6 +778,8 @@ gst_bayer2rgb_transform (GstBaseTransform * base, GstBuffer * inbuf,
   GstBayer2RGB *filter = GST_BAYER2RGB (base);
   GstMapInfo map;
   uint8_t *output;
+  int default_src_stride;
+  int used_src_stride;
   GstVideoFrame frame;
 
   GST_DEBUG ("transforming buffer");
@@ -777,8 +792,19 @@ gst_bayer2rgb_transform (GstBaseTransform * base, GstBuffer * inbuf,
     goto map_failed;
   }
 
+  default_src_stride =
+      GST_ROUND_UP_4 (filter->width) * DIV_ROUND_UP (filter->bpp, 8);
+  used_src_stride = (filter->input_stride > 0) ? filter->input_stride :
+      default_src_stride;
+
+  GST_DEBUG_OBJECT (filter,
+      "input stride: manual=%d fallback=%d used=%d out=%d w=%d h=%d bpp=%d",
+      filter->input_stride, default_src_stride, used_src_stride,
+      frame.info.stride[0], filter->width, filter->height, filter->bpp);
+
   output = GST_VIDEO_FRAME_PLANE_DATA (&frame, 0);
-  gst_bayer2rgb_process (filter, output, frame.info.stride[0], map.data);
+  gst_bayer2rgb_process (filter, output, frame.info.stride[0], map.data,
+      used_src_stride);
 
   gst_video_frame_unmap (&frame);
   gst_buffer_unmap (inbuf, &map);
